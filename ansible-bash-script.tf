@@ -25,7 +25,7 @@ ansible_ssh_common_args='-o UserKnownHostsFile=/dev/null -o StrictHostKeyCheckin
 localhost ansible_connection=local
 
 [docker_host]
-${aws_instance.team-1-docker-server.private_ip} ansible_user=ubuntu ansible_ssh_private_key_file=/home/ec2-user/.ssh/id_rsa
+${aws_instance.docker-server.private_ip} ansible_user=ubuntu ansible_ssh_private_key_file=/home/ec2-user/.ssh/id_rsa
 EOT
 
 sudo mkdir /opt/docker
