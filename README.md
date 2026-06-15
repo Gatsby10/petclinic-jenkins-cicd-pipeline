@@ -2,5 +2,5 @@
 
 #Architectural Diagram
 
-<img width="549" height="353" alt="image" src="https://github.com/user-attachments/assets/ae25828a-e470-4725-a7b3-bb270d81a070" />
+<img width="575" height="469" alt="Image" src="https://github.com/user-attachments/assets/fbf5b25a-2032-4f90-9a9b-72a70ee72e43" />
 
