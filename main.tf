@@ -563,7 +563,7 @@ resource "aws_lb_target_group" "target-group-lb-HTTPS" {
   }
 
   tags = {
-    Name = "team-1-https-target-group"
+    Name = "https-target-group"
   }
 }
 
@@ -580,3 +580,396 @@ resource "aws_lb_target_group_attachment" "lb_attachment_https" {
   port             = 443
 }
 
+#Creating Instance profile for EC2 instances to access AWS resources
+resource "aws_iam_instance_profile" "iam-instance-profile1" {
+  name = "team-1-instance-profile"
+  role = aws_iam_role.iam-role1.name
+}
+
+//Creating AMI 
+resource "aws_ami_from_instance" "asg_ami" {
+  name                    = "asg-ami"
+  source_instance_id      = aws_instance.docker-server.id
+  snapshot_without_reboot = true
+  depends_on              = [aws_instance.docker-server, time_sleep.ami-sleep]
+}
+
+//Creating time sleep 
+resource "time_sleep" "ami-sleep" {
+  depends_on      = [aws_instance.docker-server]
+  create_duration = "360s"
+}
+
+resource "aws_launch_template" "app-lt" {
+  name_prefix   = "app-lt"
+  image_id      = aws_ami_from_instance.asg_ami.id
+  instance_type = "t3.micro"                       #free tier instance type
+  key_name      = aws_key_pair.key.key_name # to be defined when keypair is made
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.iam-instance-profile1.id
+  }
+  network_interfaces {
+    #associate_public_ip_address = true
+    security_groups = [aws_security_group.docker_sg.id]
+  }
+  user_data = base64encode(local.docker_user_data)
+}
+
+#Creating IAM role for EC2 instances to access AWS resources
+resource "aws_iam_role" "iam-role1" {
+  name = "team-1-iam-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+
+#auto scaling policy
+resource "aws_autoscaling_policy" "asg-policy" {
+  name               = "scale-out-policy"
+  scaling_adjustment = 1
+  adjustment_type    = "ChangeInCapacity"
+  cooldown           = 300
+
+  autoscaling_group_name = aws_autoscaling_group.asg.name
+}
+
+# Autoscaling group
+resource "aws_autoscaling_group" "asg" {
+  name                      = "asg"
+  desired_capacity          = 2
+  max_size                  = 5
+  min_size                  = 1
+  health_check_grace_period = 300
+  health_check_type         = "EC2"
+  force_delete              = true
+
+  launch_template {
+    id      = aws_launch_template.app-lt.id
+    version = "$Latest"
+  }
+
+  vpc_zone_identifier = [
+    aws_subnet.prisub-1.id,
+    aws_subnet.prisub-2.id
+  ]
+
+  target_group_arns = [aws_lb_target_group.target-group-lb-HTTP.arn, aws_lb_target_group.target-group-lb-HTTPS.arn]
+}
+#load balancer listener
+resource "aws_lb_listener" "lb-listener" {
+  load_balancer_arn = aws_lb.app-lb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.target-group-lb-HTTP.arn
+  }
+}
+
+
+# ACM Certificate for domain
+resource "aws_acm_certificate" "certificate" {
+  domain_name               = var.domain_name
+  subject_alternative_names = ["*.${var.domain_name}"]
+  validation_method         = "DNS"
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+#creating stage elb
+
+resource "aws_elb" "elb-jenkins" {
+
+name = "elb-jenkins"
+
+security_groups = [aws_security_group.jenkins_sg.id]
+
+subnets = [aws_subnet.pubsub-1.id, aws_subnet.pubsub-2.id]
+
+
+ listener {
+
+instance_port = 8080
+
+instance_protocol = "http"
+
+lb_port = 443
+
+lb_protocol = "https"
+
+ssl_certificate_id = aws_acm_certificate.certificate.arn
+
+ }
+
+
+
+health_check {
+
+healthy_threshold = 2
+
+unhealthy_threshold = 2
+
+timeout = 3
+
+target = "tcp:8080"
+
+interval = 30
+
+ }
+
+
+
+instances = [aws_instance.jenkins.id]
+
+cross_zone_load_balancing  = true
+
+idle_timeout = 400
+
+connection_draining = true
+
+connection_draining_timeout = 400
+
+ tags = {
+
+Name = "elb-jenkins"
+
+ }
+
+}
+
+# Creating ELB for Nexus
+resource "aws_elb" "elb-nexus" {
+  name = "elb-nexus"
+
+  security_groups = [aws_security_group.nexus_sg.id]
+
+  subnets = [
+    aws_subnet.pubsub-1.id,
+    aws_subnet.pubsub-2.id
+  ]
+
+  listener {
+    instance_port      = var.nexus_port
+    instance_protocol  = "http"
+    lb_port            = 443
+    lb_protocol        = "https"
+    ssl_certificate_id = aws_acm_certificate.certificate.arn
+  }
+
+  health_check {
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 3
+    target              = "TCP:${var.nexus_port}"
+    interval            = 30
+  }
+
+  instances = [aws_instance.nexus.id]
+
+  cross_zone_load_balancing   = true
+  idle_timeout                = 400
+  connection_draining         = true
+  connection_draining_timeout = 400
+
+  tags = {
+    Name = "elb-nexus"
+  }
+}
+
+# Creating ELB for SonarQube
+resource "aws_elb" "elb-sonarqube" {
+  name = "elb-sonarqube"
+
+  security_groups = [aws_security_group.sonarqube_sg.id]
+
+  subnets = [
+    aws_subnet.pubsub-1.id,
+    aws_subnet.pubsub-2.id
+  ]
+
+  listener {
+    instance_port      = var.sonar_port
+    instance_protocol  = "http"
+    lb_port            = 443
+    lb_protocol        = "https"
+    ssl_certificate_id = aws_acm_certificate.certificate.arn
+  }
+
+  health_check {
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 3
+    target              = "TCP:${var.sonar_port}"
+    interval            = 30
+  }
+
+  instances = [aws_instance.sonarqube.id]
+
+  cross_zone_load_balancing   = true
+  idle_timeout                = 400
+  connection_draining         = true
+  connection_draining_timeout = 400
+
+  tags = {
+    Name = "elb-sonarqube"
+  }
+}
+
+# Creating record set in Route53 for Domain Validation
+resource "aws_route53_record" "cert_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.certificate.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+  allow_overwrite = true
+  name            = each.value.name
+  records         = [each.value.record]
+  type            = each.value.type
+  ttl             = 60
+  zone_id         = data.aws_route53_zone.zone.zone_id
+}
+
+# ACM certificate validation 
+resource "aws_acm_certificate_validation" "cert_validation" {
+  certificate_arn         = aws_acm_certificate.certificate.arn
+  validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+}
+
+#Creating Route53 hosted zone for domain
+data "aws_route53_zone" "zone" {
+  name         = var.domain_name
+  private_zone = false
+}
+
+ 
+# Route 53 A records for each server as subdomains
+resource "aws_route53_record" "jenkins" {
+  zone_id = data.aws_route53_zone.zone.zone_id
+  name    = "jenkins.gatsby-devops.com"
+  type    = "A"
+  alias {
+    name                   = aws_elb.elb-jenkins.dns_name
+    zone_id                = aws_elb.elb-jenkins.zone_id
+    evaluate_target_health = true
+  }
+}
+ 
+ 
+resource "aws_route53_record" "sonarqube" {
+  zone_id = data.aws_route53_zone.zone.zone_id
+  name    = "sonarqube.gatsby-devops.com"
+  type    = "A"
+  alias {
+    name                   = aws_elb.elb-sonarqube.dns_name
+    zone_id                = aws_elb.elb-sonarqube.zone_id
+    evaluate_target_health = true
+  }
+}
+ 
+resource "aws_route53_record" "docker" {
+  zone_id = data.aws_route53_zone.zone.zone_id
+  name    = "docker.gatsby-devops.com"
+  type    = "A"
+  alias {
+    name                   = aws_lb.team-1-app-lb.dns_name
+    zone_id                = aws_lb.team-1-app-lb.zone_id
+    evaluate_target_health = true
+  }
+}
+ 
+resource "aws_route53_record" "nexus" {
+  zone_id = data.aws_route53_zone.zone.zone_id
+  name    = "nexus.gatsby-devops.com"
+  type    = "A"
+  alias {
+    name                   = aws_elb.elb-nexus.dns_name
+    zone_id                = aws_elb.elb-nexus.zone_id
+    evaluate_target_health = true
+  }
+}
+
+//Creating secreets manager
+resource "aws_secretsmanager_secret" "mysql-secret" {
+  name                    = "mysql-secreet1"
+  recovery_window_in_days = 0
+}
+
+data "aws_secretsmanager_random_password" "db-password" {
+  password_length     = 10
+  exclude_punctuation = true
+}
+
+resource "aws_secretsmanager_secret_version" "dbase-secret" {
+  secret_id     = aws_secretsmanager_secret.mysql-secret.id
+  secret_string = data.aws_secretsmanager_random_password.db-password.random_password
+}
+
+//creating subnet group 
+resource "aws_db_subnet_group" "database" {
+  name       = "database-sgb"
+  subnet_ids = [aws_subnet.prisub-1.id, aws_subnet.prisub-2.id]
+
+  tags = {
+    Name = "${local.name}- db-subnet"
+  }
+}
+
+//creating RDS database 
+resource "aws_db_instance" "pet-clinic-db" {
+  identifier             = var.db-identifier
+  db_subnet_group_name   = aws_db_subnet_group.database.name
+  vpc_security_group_ids = [aws_security_group.rds-sg.id]
+  allocated_storage      = 10
+  db_name                = var.dbname
+  engine                 = "mysql"
+  engine_version         = "5.7"
+  instance_class         = "db.t3.micro"
+  username               = var.dbusername
+  password               = aws_secretsmanager_secret_version.dbase-secret.secret_string
+  parameter_group_name   = "default.mysql5.7"
+  skip_final_snapshot    = true
+  publicly_accessible    = false
+  storage_type           = "gp2"
+}
+
+#creating rds security group 
+resource "aws_security_group" "rds-sg" {
+  name        = "rds-sg"
+  description = "allowing outbound traffic"
+  vpc_id      = aws_vpc.vpc.id
+
+  ingress {
+    description     = "MYSQL"
+    protocol        = "tcp"
+    from_port       = var.mysqlport
+    to_port         = var.mysqlport
+    security_groups = [aws_security_group.ansible_bastion_sg.id, aws_security_group.docker_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [var.all_cidr_blocks]
+    description = "allow all traffic"
+  }
+  tags = {
+    name = "rds-sg"
+  }
+}
