@@ -410,4 +410,173 @@ resource "aws_security_group" "rds_sg" {
   }
 }
 
+#creating ansible server 
+resource "aws_instance" "ansible_server" {
+  ami                         = var.redhat
+  instance_type               = "t2.micro"
+  key_name                    = aws_key_pair.key.id
+  vpc_security_group_ids      = [aws_security_group.ansible_bastion_sg.id]
+  subnet_id                   = aws_subnet.pubsub-1.id
+  associate_public_ip_address = true
+
+  user_data = local.ansible_user_data
+
+  tags = {
+    Name = "${local.name}-ansible_server"
+  }
+}
+
+
+# Creating Jenkins server
+resource "aws_instance" "jenkins" {
+  ami                         = var.redhat #redhat instance
+  instance_type               = "t3.medium"
+  key_name                    = aws_key_pair.key.id
+  vpc_security_group_ids      = [aws_security_group.jenkins_sg.id]
+  subnet_id                   = aws_subnet.pubsub-2.id
+  associate_public_ip_address = true
+
+  user_data = local.jenkins_script
+
+  tags = {
+    Name = "${local.name}-jenkins-server"
+  }
+}
+
+
+#creating bastion server
+resource "aws_instance" "bastion_server" {
+  ami                         = var.redhat
+  instance_type               = "t2.micro"
+  key_name                    = aws_key_pair.key.id
+  vpc_security_group_ids      = [aws_security_group.ansible_bastion_sg.id]
+  subnet_id                   = aws_subnet.pubsub-2.id
+  associate_public_ip_address = true
+
+  user_data = local.bastion_user_data
+
+  tags = {
+    Name = "${local.name}-bastion_server"
+  }
+}
+
+# SonarQube Server
+resource "aws_instance" "sonarqube" {
+  ami                         = var.ubuntu # Use Ubuntu AMI
+  instance_type               = "t2.medium"
+  key_name                    = aws_key_pair.key.id
+  vpc_security_group_ids      = [aws_security_group.sonarqube_sg.id]
+  subnet_id                   = aws_subnet.pubsub-1.id
+  associate_public_ip_address = true
+
+  user_data = local.sonarqube_user_data
+
+  tags = {
+    Name = "${local.name}-sonarqube-server"
+  }
+}
+
+#creating docker host
+resource "aws_instance" "docker-server" {
+  ami                         = var.ubuntu # Use Ubuntu AMI
+  instance_type               = "t2.medium"
+  key_name                    = aws_key_pair.key.id
+  vpc_security_group_ids      = [aws_security_group.docker_sg.id]
+  subnet_id                   = aws_subnet.pubsub-1.id
+  associate_public_ip_address = true
+
+  user_data = local.docker_user_data
+
+  tags = {
+    Name = "${local.name}-docker-server"
+  }
+}
+
+#creating nexus server
+# Creating Nexus server
+resource "aws_instance" "nexus" {
+  ami                         = var.redhat
+  instance_type               = "t2.medium"
+  associate_public_ip_address = true
+  vpc_security_group_ids      = [aws_security_group.nexus_sg.id]
+  subnet_id                   = aws_subnet.pubsub-1.id
+  key_name                    = aws_key_pair.key.id
+  user_data                   = local.nexus_user_data
+  metadata_options {
+    http_tokens = "required"
+  }
+  tags = {
+    Name = "${local.name}-nexus"
+  }
+}
+
+# Creating Application Load Balancer
+resource "aws_lb" "app-lb" {
+  name               = "test-lb-tf"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.docker_sg.id]
+  subnets            = [aws_subnet.pubsub-1.id, aws_subnet.pubsub-2.id]
+
+  enable_deletion_protection = false
+
+  tags = {
+    Environment = "production"
+  }
+}
+
+resource "aws_lb_target_group" "target-group-lb-HTTP" {
+  name        = "tg-http"
+  port        = 80
+  protocol    = "HTTP"
+  target_type = "instance"
+  vpc_id      = aws_vpc.vpc.id
+
+  health_check {
+    path                = "/indextest.html"
+    interval            = 60
+    timeout             = 30
+    healthy_threshold   = 3
+    unhealthy_threshold = 5
+    port                = 80
+  }
+
+  tags = {
+    Name = "http-target-group"
+  }
+}
+
+resource "aws_lb_target_group" "target-group-lb-HTTPS" {
+  name        = "tg-https"
+  port        = 443
+  protocol    = "HTTPS"
+  target_type = "instance"
+  vpc_id      = aws_vpc.vpc.id
+
+  health_check {
+    path                = "/indextest.html"
+    interval            = 60
+    timeout             = 30
+    healthy_threshold   = 3
+    unhealthy_threshold = 5
+    port                = 80
+  }
+
+  tags = {
+    Name = "team-1-https-target-group"
+  }
+}
+
+# Load balancer attachment
+resource "aws_lb_target_group_attachment" "lb_attachment_http" {
+  target_group_arn = aws_lb_target_group.target-group-lb-HTTP.arn
+  target_id        = aws_instance.docker-server.id
+  port             = 80
+}
+
+resource "aws_lb_target_group_attachment" "lb_attachment_https" {
+  target_group_arn = aws_lb_target_group.target-group-lb-HTTPS.arn
+  target_id        = aws_instance.docker-server.id
+  port             = 443
+}
 
